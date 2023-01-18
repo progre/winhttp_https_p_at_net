@@ -1,4 +1,8 @@
-use std::{ffi::c_void, mem::transmute, sync::Mutex};
+use std::{
+    ffi::c_void,
+    mem::{size_of_val, transmute},
+    sync::Mutex,
+};
 
 use once_cell::sync::Lazy;
 use windows::{
@@ -7,7 +11,9 @@ use windows::{
     Win32::{
         Foundation::{BOOL, FARPROC, HINSTANCE, MAX_PATH},
         Networking::WinHttp::{
-            WINHTTP_ACCESS_TYPE, WINHTTP_FLAG_SECURE, WINHTTP_OPEN_REQUEST_FLAGS,
+            WINHTTP_ACCESS_TYPE, WINHTTP_FLAG_SECURE, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2,
+            WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3, WINHTTP_OPEN_REQUEST_FLAGS,
+            WINHTTP_OPTION_SECURE_PROTOCOLS,
         },
         System::{
             LibraryLoader::{GetProcAddress, LoadLibraryW},
@@ -27,6 +33,7 @@ static mut ORIGINAL_WIN_HTTP_QUERY_HEADERS: FARPROC = None;
 static mut ORIGINAL_WIN_HTTP_READ_DATA: FARPROC = None;
 static mut ORIGINAL_WIN_HTTP_RECEIVE_RESPONSE: FARPROC = None;
 static mut ORIGINAL_WIN_HTTP_SEND_REQUEST: FARPROC = None;
+static mut ORIGINAL_WIN_HTTP_SET_OPTION: FARPROC = None;
 static mut ORIGINAL_WIN_HTTP_SET_TIMEOUTS: FARPROC = None;
 
 static P_AT_CONN: Lazy<Mutex<Option<usize>>> = Lazy::new(Default::default);
@@ -99,7 +106,28 @@ pub extern "system" fn WinHttpOpen(
         dwflags: u32,
     ) -> *mut c_void;
     let func: Func = unsafe { transmute(ORIGINAL_WIN_HTTP_OPEN) };
-    func(pszagentw, dwaccesstype, pszproxyw, pszproxybypassw, dwflags)
+    let internet = func(pszagentw, dwaccesstype, pszproxyw, pszproxybypassw, dwflags);
+
+    {
+        let flag = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+
+        type Func = extern "system" fn(
+            hinternet: *const c_void,
+            dwoption: u32,
+            lpbuffer: *const c_void,
+            dwbufferlength: u32,
+        ) -> BOOL;
+        let func: Func = unsafe { transmute(ORIGINAL_WIN_HTTP_SET_OPTION) };
+        func(
+            internet,
+            WINHTTP_OPTION_SECURE_PROTOCOLS,
+            &flag as *const _ as _,
+            size_of_val(&flag) as u32,
+        )
+        .ok()
+        .unwrap();
+    }
+    internet
 }
 
 #[no_mangle]
@@ -299,6 +327,8 @@ pub fn setup_winhttp_hook() {
     unsafe { ORIGINAL_WIN_HTTP_RECEIVE_RESPONSE = Some(func.unwrap()) };
     let func = unsafe { GetProcAddress(dll_instance, s!("WinHttpSendRequest")) };
     unsafe { ORIGINAL_WIN_HTTP_SEND_REQUEST = Some(func.unwrap()) };
+    let func = unsafe { GetProcAddress(dll_instance, s!("WinHttpSetOption")) };
+    unsafe { ORIGINAL_WIN_HTTP_SET_OPTION = Some(func.unwrap()) };
     let func = unsafe { GetProcAddress(dll_instance, s!("WinHttpSetTimeouts")) };
     unsafe { ORIGINAL_WIN_HTTP_SET_TIMEOUTS = Some(func.unwrap()) };
 }
